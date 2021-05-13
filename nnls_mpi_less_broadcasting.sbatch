@@ -2,12 +2,12 @@
 
 #SBATCH --nodes=20
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=1
 #SBATCH --time=01:00:00
 #SBATCH --mem=20GB
-#SBATCH --job-name=nnls
+#SBATCH --job-name=nnls_mpi_less_broadcasting
 
 module purge
 module load amber/openmpi/intel/20.06
 
-mpiexec ./nnls
+mpiexec ./nnls_mpi_less_broadcasting
