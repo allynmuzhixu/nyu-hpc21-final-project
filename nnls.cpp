@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <mpi.h>
-
+#include <omp.h>
 
 void MMult0(long m, long n, long k, double *a, double *b, double *c) {
   for (long j = 0; j < n; j++) {
@@ -20,20 +20,15 @@ void MMult0(long m, long n, long k, double *a, double *b, double *c) {
 
 double evaluate(double* A, double* x, double* y, long N) {
   double* prediction = (double*) calloc(N, sizeof(double));
-
   MMult0(N, 1, N, A, x, prediction);
 
   double err = 0.0;
   for (long i = 0; i < N; i++) err = err + std::pow(prediction[i] - y[i],2);
-
   free(prediction);
-
   return err;
 }
 
 void nnls_seq(double* x, const double* Q, const double* inv_Qdiag, const double* c, long N, long max_iters) {
-  //x_new = (double*) malloc(N * sizeof(double));
-
   double x_old;
   double delta_x;
   double* mu = (double*) malloc(N * sizeof(double));
@@ -55,18 +50,42 @@ void nnls_seq(double* x, const double* Q, const double* inv_Qdiag, const double*
         }
       }
     }
+  }
 
+  free(mu);
+}
+void nnls_omp(double* x, const double* Q, const double* inv_Qdiag, const double* c, long N, long max_iters) {
+  double x_old;
+  double delta_x;
+  double* mu = (double*) malloc(N * sizeof(double));
+
+  for (long i = 0; i < N; i++) {
+    x[i] = 0.0;
+    mu[i] = c[i];
+  }
+
+  for (long iter = 0; iter < max_iters; iter++) {
+    for (long j = 0; j < N; j++) {
+      x_old = x[j];
+      x[j] = std::max(0.0, x_old - mu[j] * inv_Qdiag[j]);
+      delta_x = x[j] - x_old;
+
+      if ((delta_x > 1e-10) | (delta_x < -1e-10)) {
+        #pragma omp parallel for
+        for (long i = 0; i < N; i++) {
+          mu[i] = mu[i] + delta_x*Q[i+N*j];
+        }
+      }
+    }
   }
 
   free(mu);
 }
 
 void nnls_mpi(double* x, const double* Q, const double* inv_Qdiag, const double* c, long N, long max_iters, MPI_Comm comm, int mpirank, int mpisize, double& tt) {
-  
-  //Compute scan with MPI, save to B1
   long N_proc = long(N / mpisize);
 
-
+  //Scatter quantities to nodes
   double* Q_proc = (double*) malloc(N_proc * N * sizeof(double));
   double* inv_Qdiag_proc = (double*) malloc(N_proc * sizeof(double));
   double* c_proc = (double*) malloc(N_proc * sizeof(double));
@@ -75,20 +94,15 @@ void nnls_mpi(double* x, const double* Q, const double* inv_Qdiag, const double*
   MPI_Scatter(inv_Qdiag, N_proc, MPI_DOUBLE, inv_Qdiag_proc, N_proc, MPI_DOUBLE, 0, comm);
   MPI_Scatter(c, N_proc, MPI_DOUBLE, c_proc, N_proc, MPI_DOUBLE, 0, comm);
   MPI_Barrier(comm);
-
   tt = MPI_Wtime();
 
-  //Compute scan within each compute node
+  //Run NNLS
   double* x_proc = (double*) calloc(N_proc, sizeof(double));
   double x_old;
   double* mu_proc = c_proc;
-  
-  long block_start = N_proc * mpirank;
-  long block_end = N_proc * (mpirank + 1);
 
   double delta_x;
   long j;
-
   for (long iters = 0; iters < max_iters; iters++) {
     for (int root = 0; root < mpisize; root++) {
 
@@ -138,9 +152,76 @@ void nnls_mpi(double* x, const double* Q, const double* inv_Qdiag, const double*
   free(x_proc);
 }
 
+void nnls_mpi_omp(double* x, const double* Q, const double* inv_Qdiag, const double* c, long N, long max_iters, MPI_Comm comm, int mpirank, int mpisize, double& tt) {
+  long N_proc = long(N / mpisize);
 
+  //Scatter quantities to nodes
+  double* Q_proc = (double*) malloc(N_proc * N * sizeof(double));
+  double* inv_Qdiag_proc = (double*) malloc(N_proc * sizeof(double));
+  double* c_proc = (double*) malloc(N_proc * sizeof(double));
 
+  MPI_Scatter(Q, N_proc*N, MPI_DOUBLE, Q_proc, N_proc*N, MPI_DOUBLE, 0, comm);
+  MPI_Scatter(inv_Qdiag, N_proc, MPI_DOUBLE, inv_Qdiag_proc, N_proc, MPI_DOUBLE, 0, comm);
+  MPI_Scatter(c, N_proc, MPI_DOUBLE, c_proc, N_proc, MPI_DOUBLE, 0, comm);
+  MPI_Barrier(comm);
+  tt = MPI_Wtime();
 
+  //Run NNLS
+  double* x_proc = (double*) calloc(N_proc, sizeof(double));
+  double x_old;
+  double* mu_proc = c_proc;
+
+  double delta_x;
+  long j;
+  for (long iters = 0; iters < max_iters; iters++) {
+    for (int root = 0; root < mpisize; root++) {
+
+      if (mpirank == root) {
+        for (j = 0; j < N_proc; j++) {
+          x_old = x_proc[j];
+          x_proc[j] = std::max(0.0, x_old - mu_proc[j] * inv_Qdiag_proc[j]);
+          delta_x = x_proc[j] - x_old;
+
+          if ((delta_x > 1e-10) | (delta_x < -1e-10)) {
+            MPI_Bcast(&j, 1, MPI_LONG, root, comm);
+            MPI_Bcast(&delta_x, 1, MPI_DOUBLE, root, comm);
+
+            #pragma omp parallel for
+            for (long i = 0; i < N_proc; i++) {
+              mu_proc[i] = mu_proc[i] + delta_x * Q_proc[N*i+N_proc*root+j]; //Q is symmetric
+            }
+          }
+        }
+        MPI_Bcast(&j, 1, MPI_LONG, root, comm);
+
+      } else {
+        MPI_Bcast(&j, 1, MPI_LONG, root, comm);
+
+        while (j < N_proc) {
+          MPI_Bcast(&delta_x, 1, MPI_DOUBLE, root, comm);
+
+          #pragma omp parallel for
+          for (long i = 0; i < N_proc; i++) {
+            mu_proc[i] = mu_proc[i] + delta_x * Q_proc[N*i+N_proc*root+j]; //Q is symmetric
+          }
+
+          MPI_Bcast(&j, 1, MPI_LONG, root, comm);
+        }
+      }
+    }
+  }
+
+  //Send results to node 0
+  MPI_Gather(x_proc, N_proc, MPI_DOUBLE, x, N_proc, MPI_DOUBLE, 0, comm);
+
+  tt = MPI_Wtime() - tt;
+
+  free(Q_proc);
+  free(inv_Qdiag_proc);
+  free(c_proc);
+
+  free(x_proc);
+}
 
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
@@ -158,8 +239,8 @@ int main(int argc, char** argv) {
 
   MPI_Barrier(comm);
 
-  long N = 20000;//1000;
-  long max_iters = 2000;
+  long N = 10000;
+  long max_iters = 100;
 
   //Initialize
   double* A = NULL;
@@ -169,8 +250,12 @@ int main(int argc, char** argv) {
   double* inv_Qdiag = NULL;
   double* c = NULL;
   double* x_seq = NULL;
+  double* x_omp = NULL;
   double* x_mpi = NULL;
-  
+  double* x_mpi_omp = NULL;
+
+  if (mpirank == 0) printf("nnls\n");
+  if (mpirank == 0) printf("N = %ld, max_iters = %ld\n", N, max_iters);
 
 
   if (mpirank == 0) {
@@ -203,17 +288,35 @@ int main(int argc, char** argv) {
   double tt = 0.0;
   if (mpirank == 0) {
     x_seq = (double*) malloc(N * sizeof(double));
+    x_omp = (double*) malloc(N * sizeof(double));
     x_mpi = (double*) malloc(N * sizeof(double));
+    x_mpi_omp = (double*) malloc(N * sizeof(double));
 
+    //Compute NNLS sequentially
     tt = MPI_Wtime();
     nnls_seq(x_seq, Q, inv_Qdiag, c, N, max_iters);
-    printf("sequential-nnls = %fs\n", MPI_Wtime() - tt);
+    tt = MPI_Wtime() - tt;
+    printf("sequential-nnls = %fs\n", tt);
+    printf("flop-rate = %fGb/s\n", (double)max_iters*(3*N+2*N*N) / tt / 1e9);
+
+    //Compute NNLS with OMP
+    tt = MPI_Wtime();
+    nnls_seq(x_omp, Q, inv_Qdiag, c, N, max_iters);
+    tt = MPI_Wtime() - tt;
+    printf("omp-nnls = %fs\n", tt);
+    printf("flop-rate = %fGb/s\n", (double)max_iters*(3*N+2*N*N) / tt / 1e9);
   }
 
-  
-  //Compute scan with MPI, save to B1
+
+  //Compute NNLS with MPI
   nnls_mpi(x_mpi, Q, inv_Qdiag, c, N, max_iters, comm, mpirank, mpisize, tt);
   if (mpirank == 0) printf("mpi-nnls = %fs\n", tt);
+  if (mpirank == 0) printf("flop-rate = %fGb/s\n", (double)max_iters*(3*N+2*N*N) / tt / 1e9);
+  //Compute NNLS with MPI + OMP
+  nnls_mpi_omp(x_mpi_omp, Q, inv_Qdiag, c, N, max_iters, comm, mpirank, mpisize, tt);
+  if (mpirank == 0) printf("mpi-omp-nnls = %fs\n", tt);
+  if (mpirank == 0) printf("flop-rate = %fGb/s\n", (double)max_iters*(3*N+2*N*N) / tt / 1e9);
+
 
   if (mpirank == 0) {
     double err = 0.0;
@@ -221,14 +324,15 @@ int main(int argc, char** argv) {
     printf("error = %f\n", err);
 
     printf("objective_seq = %f\n", evaluate(A,x_seq,y,N));
+    printf("objective_omp = %f\n", evaluate(A,x_omp,y,N));
     printf("objective_mpi = %f\n", evaluate(A,x_mpi,y,N));
+    printf("objective_mpi_omp = %f\n", evaluate(A,x_mpi_omp,y,N));
 
 
     printf("Q\tc\tseq\tmpi\n");
     for (long i = 0; i < 100; i++) printf("%f\t%f\t%f\t%f\n", inv_Qdiag[i], c[i], x_seq[i], x_mpi[i]);
 
   }
-
 
 
   MPI_Finalize();
