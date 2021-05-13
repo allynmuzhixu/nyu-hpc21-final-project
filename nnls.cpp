@@ -35,6 +35,7 @@ void nnls_seq(double* x, const double* Q, const double* inv_Qdiag, const double*
   //x_new = (double*) malloc(N * sizeof(double));
 
   double x_old;
+  double delta_x;
   double* mu = (double*) malloc(N * sizeof(double));
 
   for (long i = 0; i < N; i++) {
@@ -46,9 +47,12 @@ void nnls_seq(double* x, const double* Q, const double* inv_Qdiag, const double*
     for (long j = 0; j < N; j++) {
       x_old = x[j];
       x[j] = std::max(0.0, x_old - mu[j] * inv_Qdiag[j]);
-      
-      for (long i = 0; i < N; i++) {
-        mu[i] = mu[i] + (x[j] - x_old)*Q[i+N*j];
+      delta_x = x[j] - x_old;
+
+      if ((delta_x > 1e-10) | (delta_x < -1e-10)) {
+        for (long i = 0; i < N; i++) {
+          mu[i] = mu[i] + (x[j] - x_old)*Q[i+N*j];
+        }
       }
     }
 
@@ -83,20 +87,41 @@ void nnls_mpi(double* x, const double* Q, const double* inv_Qdiag, const double*
   long block_end = N_proc * (mpirank + 1);
 
   double delta_x;
-
+  long j;
 
   for (long iters = 0; iters < max_iters; iters++) {
-    for (long j = 0; j < N; j++) {
-      if ( mpirank == j / N_proc ) {
-        x_old = x_proc[j % N_proc];
-        x_proc[j % N_proc] = std::max(0.0, x_old - mu_proc[j % N_proc] * inv_Qdiag_proc[j % N_proc]);
-        delta_x = x_proc[j % N_proc] - x_old;
-      }
+    for (int root = 0; root < mpisize; root++) {
 
-      MPI_Bcast(&delta_x, 1, MPI_DOUBLE, j / N_proc, comm);
-      
-      for (long i = 0; i < N_proc; i++) {
-        mu_proc[i] = mu_proc[i] + delta_x * Q_proc[N*i+j]; //Q is symmetric
+      if (mpirank == root) {
+        for (j = 0; j < N_proc; j++) {
+          x_old = x_proc[j];
+          x_proc[j] = std::max(0.0, x_old - mu_proc[j] * inv_Qdiag_proc[j]);
+          delta_x = x_proc[j] - x_old;
+
+          if ((delta_x > 1e-10) | (delta_x < -1e-10)) {
+            MPI_Bcast(&j, 1, MPI_LONG, root, comm);
+            MPI_Bcast(&delta_x, 1, MPI_DOUBLE, root, comm);
+
+            for (long i = 0; i < N_proc; i++) {
+              mu_proc[i] = mu_proc[i] + delta_x * Q_proc[N*i+N_proc*root+j]; //Q is symmetric
+            }
+          }
+        }
+        MPI_Bcast(&j, 1, MPI_LONG, root, comm);
+
+      } else {
+
+        MPI_Bcast(&j, 1, MPI_LONG, root, comm);
+
+        while (j < N_proc) {
+          MPI_Bcast(&delta_x, 1, MPI_DOUBLE, root, comm);
+
+          for (long i = 0; i < N_proc; i++) {
+            mu_proc[i] = mu_proc[i] + delta_x * Q_proc[N*i+N_proc*root+j]; //Q is symmetric
+          }
+
+          MPI_Bcast(&j, 1, MPI_LONG, root, comm);
+        }
       }
     }
   }
@@ -111,7 +136,6 @@ void nnls_mpi(double* x, const double* Q, const double* inv_Qdiag, const double*
   free(c_proc);
 
   free(x_proc);
-
 }
 
 
@@ -134,7 +158,7 @@ int main(int argc, char** argv) {
 
   MPI_Barrier(comm);
 
-  long N = 1000;
+  long N = 20000;//1000;
   long max_iters = 2000;
 
   //Initialize
