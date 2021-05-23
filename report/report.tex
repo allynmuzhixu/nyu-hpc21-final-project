@@ -35,7 +35,7 @@
 }
 
 % Uncomment to remove the date
-%\date{}
+\date{}
 
 % Uncomment to override  the `A preprint' in the header
 %\renewcommand{\headeright}{Technical Report}
@@ -74,9 +74,9 @@ Since each protein sequence has a fixed isotope distribution and ionization patt
 An parallel implementation of NNLS is important in this case since the number of proteins can be $N \approx 10^7$ in which case the quadratic formulation of NNLS in eq. (\ref{eq:qnnls}) has $Q \in \mathbb R^{N \times N} \approx \mathbb R^{10^7 \times 10^7}$.
 
 \section{Algorithms for NNLS}
-There are a number of commonly used algorithms for NNLS \cite{}. One popular method is an active-set method introduced by Lawson and Hanson. Although this algorithm has nice convergence guarantees, this approach requires solving the pseudo-inverse of a matrix every iteration \cite{} and so can be prohibitively expensive.
+There are a number of commonly used algorithms for NNLS \cite{chen}. One popular method is an active-set method introduced by Lawson and Hanson. Although this algorithm has nice convergence guarantees, this approach requires solving the pseudo-inverse of a matrix every iteration \cite{lawson} and so can be prohibitively expensive.
 
-There are other solvers such as Landweber's gradient descent method, and coordinate-wise algorithms. We will be focusing on an algorithm called Sequential Coordinate-wise Algorithm (SCA), which iteratively solves for the optimal value of one coordinate, while keeping all others fixed. We chose this algorithm for it's speed and simplicity, which makes implementing a parallelized version simpler and more comprehensible.
+There are other solvers such as Landweber's gradient descent method, and coordinate-wise algorithms. We will be focusing on an algorithm called Sequential Coordinate-wise Algorithm (SCA) \cite{franc}, which iteratively solves for the optimal value of one coordinate, while keeping all others fixed. We chose this algorithm for it's speed and simplicity, which makes implementing a parallelized version simpler and more comprehensible.
 
 \subsection{Sequential Coordinate-wise Algorithm}
 The Sequential Coordinate-wise Algorithm is very straightforward: for each coordinate $k \in \{1,...,N\}$, we solve for $x_k^*$ which minimizes $\frac12 x^T Q x + c^T x$ given the other coordinates $x_i$, $i \neq k$ are fixed. Since the objective function is quadratic in each coordinate, this gives us a very simple expression for the above as,
@@ -104,17 +104,14 @@ In pseudocode, SCA can be written as follows:
             if x[j] - old_x_j != 0:
                 for i = 1,...,N:
                     mu[i] = mu[i] + (x[k] - old_x_k) Q[i,j]
-            
-            
 \end{verbatim}
-
 
 \section*{Parallelization}
 Although SCA is straightforward to implement sequentially, it was not clear how to best parallelize the code so it would be scalable. The main issue is that for each step, after we update one coordinate $x_k$, we need to update the whole vector $\mu$. The whole vector $\mu$ is then needed to update the next coordinate $x_{k+1}$. 
 
 Since the coordinate updates alternate with vector updates for $\mu$, this makes it challenging to update multiple coordinates in parallel. Moreover, if we're using multiple nodes, we need to have some level of communication to properly update $\mu$.
 
-One obvious core-level parallelization we can carry out is to replace the for loop that updates $\mu$ with an omp for loop. We designate this algorithm as `NNLS-OMP'. Parallelizing across multiple compute units with MPI is slightly more difficult, and we outline two implementations below.
+One obvious core-level parallelization we can carry out is to replace the for loop that updates $\mu$ with an omp for loop. We designate this algorithm as `SCA SEQ+OMP' (while the basic sequential algorithm is denoted as `SCA SEQ'). Parallelizing across multiple compute units with MPI is slightly more difficult, and we outline two implementations below.
 
 \subsection{MPI Implementation 1}
 The main theme of multi-node parallelization of SCA is to minimize the number of communications between the nodes when updating $\mu$. A naive implementation would be to simply have node 0 gather blocks of $\mu$ from every node, and then perform an update for coordinate $x_k$. A better implementation, however, would be to instead communicate the updated value of $x_k$ and have each node update their block of $\mu$ (as every step you are communicating a scalar $x_k$ instead of a vector $\mu$ of length $N$).
@@ -127,7 +124,7 @@ This method of dividing the task is desirable since updating any entry of $\mu$ 
 
 One last hiccup in the process is that the sequential version has the advantage of skipping updates of $\mu$ when $\delta x_k = 0$ (c.f. SCA sequential code). We ideally want to avoid broadcasting anything when $\delta x_k = 0$. Otherwise, the MPI implementation will have to perform a broadcast when the sequential implementation can skips a $\mu$ update, possibly hampering the effectiveness of the MPI implementation greatly. This issue can be easily circumvented by having processor $p$ to only broadcast $\delta x_k$ for which $\delta x_k \neq 0$, and by additionally broadcasting the coordinate $k$ that was updated. This requires broadcasting two scalars, but not requires no broadcasts when a $\mu$ update is skipped.
 
-This MPI implementation is referred to as `NNLS-MPI'. Finally, this MPI implementation can still benefit from OMP by parallelizing the $\mu$ update with a OMP for loop within each compute node. This implementation with OMP for loops, is referred to as `NNLS-MPI-OMP'.
+This MPI implementation is referred to as `SCA MPI'. Finally, this MPI implementation can still benefit from OMP by parallelizing the $\mu$ update with a OMP for loop within each compute node. This implementation with OMP for loops, is referred to as `SCA MPI+OMP'.
 
 \subsection{MPI Implementation 2: Less Broadcasting}
 One issue with above implementation is that we perform a scalar broadcast whenever $mu$ needs to be updated (i.e. when $\delta x_k \neq 0$). Since there is an overhead cost to performing a broadcast, it is somewhat wasteful to only broadcast a scalar each time. Namely, broadcasting a scalar multiple times is in practice slower than broadcasting an array once, in which the array contains all the aforementioned scalars. This leads to another possible speed up with the MPI implementation.
@@ -226,32 +223,7 @@ The performances of the implementations were tested in various settings such as 
 
 
 
-\bibliographystyle{unsrtnat}
+\bibliographystyle{unsrt}
 \bibliography{references}  %%% Uncomment this line and comment out the ``thebibliography'' section below to use the external .bib file (using bibtex) .
-
-
-%%% Uncomment this section and comment out the \bibliography{references} line above to use inline references.
-% \begin{thebibliography}{1}
-
-% 	\bibitem{kour2014real}
-% 	George Kour and Raid Saabne.
-% 	\newblock Real-time segmentation of on-line handwritten arabic script.
-% 	\newblock In {\em Frontiers in Handwriting Recognition (ICFHR), 2014 14th
-% 			International Conference on}, pages 417--422. IEEE, 2014.
-
-% 	\bibitem{kour2014fast}
-% 	George Kour and Raid Saabne.
-% 	\newblock Fast classification of handwritten on-line arabic characters.
-% 	\newblock In {\em Soft Computing and Pattern Recognition (SoCPaR), 2014 6th
-% 			International Conference of}, pages 312--318. IEEE, 2014.
-
-% 	\bibitem{hadash2018estimate}
-% 	Guy Hadash, Einat Kermany, Boaz Carmeli, Ofer Lavi, George Kour, and Alon
-% 	Jacovi.
-% 	\newblock Estimate and replace: A novel approach to integrating deep neural
-% 	networks with existing applications.
-% 	\newblock {\em arXiv preprint arXiv:1804.09028}, 2018.
-
-% \end{thebibliography}
 
 \end{document}
